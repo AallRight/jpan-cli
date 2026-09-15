@@ -1,0 +1,5 @@
+node_modules/
+coverage/
+*.part
+*.upload.json
+.DS_Store

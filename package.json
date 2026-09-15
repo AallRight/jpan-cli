@@ -1,0 +1,17 @@
+{
+  "name": "jpan-cli",
+  "version": "0.1.0",
+  "description": "Command-line client for SJTU Netdisk",
+  "type": "module",
+  "bin": {
+    "jpan": "./bin/jpan.js"
+  },
+  "scripts": {
+    "test": "node --test",
+    "start": "node ./bin/jpan.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT"
+}
