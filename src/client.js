@@ -1,5 +1,7 @@
 import fs from 'node:fs'
 import fsPromises from 'node:fs/promises'
+import http from 'node:http'
+import https from 'node:https'
 import path from 'node:path'
 import { Readable } from 'node:stream'
 import { pipeline } from 'node:stream/promises'
@@ -31,6 +33,53 @@ function isConflict(status, body) {
 function toUploadURL(domain, objectPath) {
   const base = /^https?:\/\//i.test(domain) ? domain : `https://${domain}`
   return new URL(objectPath, base.endsWith('/') ? base : `${base}/`).toString()
+}
+
+function errorDetail(error) {
+  const parts = []
+  let current = error
+  for (let depth = 0; current && depth < 3; depth += 1) {
+    if (current.code) parts.push(current.code)
+    if (current.syscall) parts.push(current.syscall)
+    if (current.hostname) parts.push(current.hostname)
+    if (current.message && current.message !== 'fetch failed') parts.push(current.message)
+    current = current.cause
+  }
+  return [...new Set(parts)].join(' / ') || '未知网络错误'
+}
+
+function putFileStream(targetURL, headers, sourcePath, size, onProgress) {
+  const target = new URL(targetURL)
+  const transport = target.protocol === 'http:' ? http : https
+  const requestHeaders = Object.fromEntries(new Headers(headers).entries())
+  requestHeaders['content-length'] = String(size)
+
+  return new Promise((resolve, reject) => {
+    const request = transport.request(target, { method: 'PUT', headers: requestHeaders }, (response) => {
+      const chunks = []
+      let length = 0
+      response.on('data', (chunk) => {
+        if (length < 1024 * 1024) chunks.push(chunk)
+        length += chunk.length
+      })
+      response.on('end', () => resolve({
+        status: response.statusCode || 0,
+        ok: (response.statusCode || 0) >= 200 && (response.statusCode || 0) < 300,
+        body: Buffer.concat(chunks).toString('utf8'),
+      }))
+    })
+    request.setTimeout(120_000, () => request.destroy(Object.assign(new Error('连接超时'), { code: 'ETIMEDOUT' })))
+    request.on('error', reject)
+
+    const stream = fs.createReadStream(sourcePath)
+    let uploaded = 0
+    stream.on('data', (chunk) => {
+      uploaded += chunk.length
+      onProgress?.(uploaded, size)
+    })
+    stream.on('error', (error) => request.destroy(error))
+    stream.pipe(request)
+  })
 }
 
 export class JPanClient {
@@ -65,10 +114,15 @@ export class JPanClient {
 
     const url = new URL(`${this.baseURL}/user/v1/space/1/personal`)
     url.searchParams.set('user_token', this.config.userToken)
-    const response = await this.fetch(url, {
-      method: 'POST',
-      headers: { Accept: 'application/json', Cookie: this.cookieHeader() },
-    })
+    let response
+    try {
+      response = await this.fetch(url, {
+        method: 'POST',
+        headers: { Accept: 'application/json', Cookie: this.cookieHeader() },
+      })
+    } catch (error) {
+      throw new Error(`获取云盘访问凭据失败: ${errorDetail(error)}`, { cause: error })
+    }
     const credential = await this.responseBody(response)
     if (!credential.accessToken || !credential.libraryId || !credential.spaceId) {
       throw new Error(`登录凭据响应不完整: ${JSON.stringify(credential).slice(0, 300)}`)
@@ -102,7 +156,13 @@ export class JPanClient {
     const headers = new Headers(options.headers || {})
     headers.set('Accept', headers.get('Accept') || 'application/json, text/plain, */*')
     headers.set('Cookie', this.cookieHeader())
-    const response = await this.fetch(url, { ...options, headers })
+    let response
+    try {
+      response = await this.fetch(url, { ...options, headers })
+    } catch (error) {
+      const method = options.method || 'GET'
+      throw new Error(`交大云盘请求失败（${method} ${new URL(url).pathname}）: ${errorDetail(error)}`, { cause: error })
+    }
     if (retry && (response.status === 401 || response.status === 403)) {
       this.credential = null
       this.credentialExpiresAt = 0
@@ -193,7 +253,11 @@ export class JPanClient {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const signedURL = await this.getDownloadURL(remote)
       const headers = offset > 0 ? { Range: `bytes=${offset}-` } : {}
-      response = await this.fetch(signedURL, { headers })
+      try {
+        response = await this.fetch(signedURL, { headers })
+      } catch (error) {
+        throw new Error(`下载数据连接失败: ${errorDetail(error)}`, { cause: error })
+      }
       if (response.status !== 403 || attempt === 1) break
     }
     if (!response.ok && response.status !== 206) throw new HttpError(`下载失败: HTTP ${response.status}`, response.status)
@@ -239,23 +303,15 @@ export class JPanClient {
     try { init = JSON.parse(initText) } catch { throw new Error('初始化上传返回了无效 JSON') }
     if (!init.domain || !init.path || !init.confirmKey) throw new Error(`初始化上传响应不完整: ${initText.slice(0, 300)}`)
 
-    const uploadHeaders = new Headers(init.headers || {})
-    uploadHeaders.set('Content-Length', String(info.size))
-    const stream = fs.createReadStream(source)
-    let uploaded = 0
-    stream.on('data', (chunk) => {
-      uploaded += chunk.length
-      options.onProgress?.(uploaded, info.size)
-    })
-    const uploadResponse = await this.fetch(toUploadURL(init.domain, init.path), {
-      method: 'PUT',
-      headers: uploadHeaders,
-      body: stream,
-      duplex: 'half',
-    })
+    const uploadURL = toUploadURL(init.domain, init.path)
+    let uploadResponse
+    try {
+      uploadResponse = await putFileStream(uploadURL, init.headers || {}, source, info.size, options.onProgress)
+    } catch (error) {
+      throw new Error(`上传数据连接失败（${new URL(uploadURL).hostname}）: ${errorDetail(error)}`, { cause: error })
+    }
     if (!uploadResponse.ok) {
-      const body = await uploadResponse.text()
-      throw new HttpError(`上传数据失败: HTTP ${uploadResponse.status}: ${body.slice(0, 300)}`, uploadResponse.status, body)
+      throw new HttpError(`上传数据失败: HTTP ${uploadResponse.status}: ${uploadResponse.body.slice(0, 300)}`, uploadResponse.status, uploadResponse.body)
     }
 
     const confirmURL = this.addCommonQuery(this.fileURL(credential, init.confirmKey), credential, true)

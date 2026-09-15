@@ -44,6 +44,8 @@ async function fixture(t) {
       return res.end(JSON.stringify({ domain: baseURL, path: '/cos/upload', headers: { 'x-test': 'yes' }, confirmKey: 'confirm-1' }))
     }
     if (url.pathname === '/cos/upload' && req.method === 'PUT') {
+      assert.equal(req.headers['x-test'], 'yes')
+      assert.equal(req.headers['content-length'], '8')
       for await (const chunk of req) uploaded.push(chunk)
       res.statusCode = 200
       return res.end()
