@@ -45,6 +45,24 @@ npm link
 jpan --help
 ```
 
+### 更新已有安装
+
+如果之前通过 Git 克隆安装，进入项目目录拉取最新代码即可：
+
+```bash
+cd ~/jpan-cli
+git pull
+npm link
+```
+
+查看当前版本对应的提交：
+
+```bash
+git log -1 --oneline
+```
+
+如果 `git pull` 提示本地存在修改，请先运行 `git status` 检查，不要直接强制覆盖。
+
 ## 快速开始
 
 ```bash
@@ -100,6 +118,7 @@ jpan mkdir backups/2026
 
 jpan upload ./report.pdf
 jpan upload ./report.pdf /documents/final-report.pdf
+jpan upload ./report.pdf /documents/
 jpan upload ./photos /backup --jobs 4
 
 jpan download /documents/final-report.pdf .
@@ -120,7 +139,8 @@ jpan:/课程资料> exit
 ### 路径语义
 
 - 远端相对路径基于 `jpan pwd` 显示的当前目录。
-- 上传单文件时，如果目标已是目录，则保留本地文件名；否则目标作为完整文件路径。
+- 上传单文件时，如果目标是已有目录或以 `/` 结尾，则保留本地文件名；否则目标作为完整文件路径。
+- 例如 `jpan upload ./.gitignore /git/` 会上传为 `/git/.gitignore`；如果 `/git` 尚不存在且没有结尾 `/`，它会被当作目标文件名。
 - 上传文件夹时，会在目标目录下创建一个与本地文件夹同名的目录。
 - 下载文件夹时，会在本地目标下创建一个与远端文件夹同名的目录。
 - 符号链接会被跳过，避免递归逃出所选的本地目录。
@@ -141,6 +161,33 @@ jpan upload file.bin /backup --conflict rename
 ```
 
 下载支持 `skip` 和 `overwrite`。未完成下载保存在 `.part` 文件中，下次执行同一命令会继续下载。
+
+### 推荐的目录上传方式
+
+先显式创建目标目录，再用末尾 `/` 表示“上传到此目录”：
+
+```bash
+jpan mkdir /git
+jpan upload ./.gitignore /git/
+jpan ls -l /git
+```
+
+### 故障排查
+
+先确认登录和目录浏览正常：
+
+```bash
+jpan status
+jpan ls /
+```
+
+需要查看更完整的错误堆栈时：
+
+```bash
+JPAN_DEBUG=1 jpan upload ./test.txt /test.txt
+```
+
+上传错误会区分“初始化上传”“连接 COS 传输数据”和“确认上传”阶段，并隐藏 token 和带签名的完整 URL。反馈问题时请提供错误信息和 `node --version`，不要提供 Cookie。
 
 ## 命令一览
 
@@ -170,6 +217,8 @@ npm test
 ```
 
 测试使用本地模拟服务器，不需要真实交大账号，也不会上传或下载云盘数据。
+
+下载和上传流程也已在 Ubuntu 命令行环境中完成实际验证。
 
 ## 注意
 
